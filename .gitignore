@@ -1,0 +1,13 @@
+venv/
+.venv/
+__pycache__/
+
+# Credentials & API Keys (NEVER PUSH THESE)
+.env
+credentials.json
+
+# Local Audit Logs & Payloads
+pending_payloads.json
+posted_shipments.json
+posted_shipments_log.csv
+*.pdf
