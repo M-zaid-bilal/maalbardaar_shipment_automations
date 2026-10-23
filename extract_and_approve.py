@@ -36,9 +36,74 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive"
 ]
 
+FIELD_LABELS = {
+    "customer_ref_number": {
+        "customer ref number",
+        "customer reference number",
+        "file number",
+        "file number drive",
+        "file ref number",
+        "job number",
+        "customer ref",
+    },
+    "master_bill_of_lading_number": {
+        "air waybill number",
+        "awb number",
+        "bill of lading number",
+        "hbl",
+        "hbl number",
+        "master bill of lading number",
+        "master bl number",
+        "mbl",
+        "mbl hbl",
+        "mbl number",
+        "mbl/hbl",
+    },
+    "bank_document_number": {
+        "bank doc",
+        "bank document number",
+        "documentary credit number",
+        "lc no",
+        "lc number",
+        "lc",
+        "letter of credit number",
+    },
+    "invoice_no": {
+        "commercial invoice number",
+        "invoice",
+        "invoice no",
+        "invoice number",
+    },
+    "consignment_mode": {
+        "consignment mode",
+        "document type",
+        "mode",
+        "shipment mode",
+    },
+}
+
 # ---------------------------------------------------------
 # HELPER FUNCTIONS
 # ---------------------------------------------------------
+def normalize_field_label(label: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", label.lower())
+
+def extract_labeled_fields(text: str) -> dict[str, str]:
+    normalized_labels = {
+        normalize_field_label(alias): field
+        for field, aliases in FIELD_LABELS.items()
+        for alias in aliases
+    }
+    fields = {}
+    for part in re.split(r"\|\||[\n;]|,\s*(?=[A-Za-z][A-Za-z /()#.-]*\s*[:=])", text):
+        match = re.match(r"\s*([^:=]+?)\s*(?::|=|\s+-\s+)\s*(.*?)\s*$", part)
+        if match:
+            field = normalized_labels.get(normalize_field_label(match.group(1)))
+            value = match.group(2).strip()
+            if field and value and value.upper() != "MISSING":
+                fields[field] = value
+    return fields
+
 def extract_file_id_from_url(url: str) -> str | None:
     match = re.search(r"/d/([a-zA-Z0-9_-]+)", url)
     return match.group(1) if match else None
@@ -195,11 +260,14 @@ def run_extraction():
     def get_col_idx(name: str) -> int | None:
         return headers.index(name) + 1 if name in headers else None
 
+    normalized_labels = {
+        normalize_field_label(alias): field
+        for field, aliases in FIELD_LABELS.items()
+        for alias in aliases
+    }
     status_col_idx = get_col_idx("Maalbardaar Shipment ID")
     file_col_idx = get_col_idx("File Number (Drive)")
     spec_col_idx = get_col_idx("Special Instructions")
-    doc_type_col_idx = get_col_idx("Document Type")
-    mbl_col_idx = get_col_idx("MBL/HBL")
 
     approved_payloads = []
 
@@ -208,40 +276,53 @@ def run_extraction():
         status = row_data[status_col_idx - 1].strip().upper() if status_col_idx else ""
 
         if status == "PENDING":
-            file_no = row_data[file_col_idx - 1].strip() if file_col_idx else ""
             spec_inst = row_data[spec_col_idx - 1].strip() if spec_col_idx else ""
-            consignment_mode = row_data[doc_type_col_idx - 1].strip() if doc_type_col_idx else "FCL"
-            sheet_mbl = row_data[mbl_col_idx - 1].strip() if mbl_col_idx else ""
+            spreadsheet_fields = extract_labeled_fields(spec_inst)
+            for col_idx, header in enumerate(headers):
+                label = header.split("(", maxsplit=1)[0].strip()
+                field = normalized_labels.get(normalize_field_label(label))
+                value = row_data[col_idx].strip()
+                if field and value and value.upper() != "MISSING":
+                    spreadsheet_fields[field] = value
+
+            if file_col_idx:
+                file_no = row_data[file_col_idx - 1].strip()
+                if file_no and file_no.upper() != "MISSING":
+                    spreadsheet_fields["customer_ref_number"] = file_no
 
             drive_link = ""
-            if "||" in spec_inst:
-                drive_link = spec_inst.split("||")[1].strip()
-            elif "https://drive.google.com" in spec_inst:
-                drive_link = spec_inst.strip()
+            drive_match = re.search(r"https://drive\.google\.com/[^\s|]+", spec_inst)
+            if drive_match:
+                drive_link = drive_match.group(0).rstrip(".,)")
 
             file_id = extract_file_id_from_url(drive_link)
             pdf_bytes: bytes | None = None
             pdf_filename: str = "document.pdf"
             ai_data: dict = {}
+            missing_fields = {
+                field for field in FIELD_LABELS
+                if not spreadsheet_fields.get(field)
+            }
 
-            if file_id:
+            if file_id and missing_fields:
                 print(f"\n[INFO] Row {row_num}: Downloading PDF...")
                 pdf_bytes, pdf_filename = download_pdf_from_drive(drive_service, file_id)
                 if pdf_bytes:
-                    print("[INFO] Running Gemini AI extraction...")
+                    print("[INFO] Running Gemini AI extraction for missing fields...")
                     ai_data = extract_with_gemini_ai(pdf_bytes)
 
             # Determine consignment mode & convert LC -> LCL
-            raw_mode = consignment_mode if consignment_mode != "MISSING" else ai_data.get("consignment_mode", "FCL")
+            raw_mode = spreadsheet_fields.get("consignment_mode") or ai_data.get("consignment_mode") or "FCL"
+            raw_mode = raw_mode.strip()
             final_mode = "LCL" if raw_mode.upper() == "LC" else raw_mode.upper()
 
             payload = {
                 "sheet_row": row_num,
-                "customer_ref_number": file_no if file_no != "MISSING" else ai_data.get("customer_ref_number", ""),
+                "customer_ref_number": spreadsheet_fields.get("customer_ref_number") or ai_data.get("customer_ref_number", ""),
                 "consignment_mode": final_mode,
-                "master_bill_of_lading_number": sheet_mbl if sheet_mbl != "MISSING" else ai_data.get("master_bill_of_lading_number", ""),
-                "bank_document_number": ai_data.get("bank_document_number", ""),
-                "invoice_no": ai_data.get("invoice_no", ""),
+                "master_bill_of_lading_number": spreadsheet_fields.get("master_bill_of_lading_number") or ai_data.get("master_bill_of_lading_number", ""),
+                "bank_document_number": spreadsheet_fields.get("bank_document_number") or ai_data.get("bank_document_number", ""),
+                "invoice_no": spreadsheet_fields.get("invoice_no") or ai_data.get("invoice_no", ""),
                 "item_description": f"{spec_inst} | Drive Link: {drive_link}".strip(" |"),
                 "status": "draft"
             }
