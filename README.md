@@ -40,8 +40,6 @@ python -m pip install gspread google-auth google-api-python-client google-genai 
 
    `GEMINI_API_KEY` is required by `extract_and_approve.py`. `MAALBARDAAR_API_KEY` is required by `post_shipments.py`. The spreadsheet name, tab, and API URL can be overridden in `.env`.
 
-   **Posting authentication needs configuration:** although `post_shipments.py` checks that `MAALBARDAAR_API_KEY` is present, its request currently sends a literal placeholder as the `Authorization` header instead of using that environment variable. Configure the header in the script for the API's required authentication scheme before attempting live submissions.
-
 ## Google Sheet format
 
 The first row must contain these column names:

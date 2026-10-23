@@ -5,6 +5,7 @@ __pycache__/
 # Credentials & API Keys (NEVER PUSH THESE)
 .env
 credentials.json
+.Zone.Identifier
 
 # Local Audit Logs & Payloads
 pending_payloads.json
